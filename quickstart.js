@@ -1,124 +1,91 @@
-var fs = require('fs');
-var readline = require('readline');
-var google = require('googleapis');
-var googleAuth = require('google-auth-library');
+const fs = require('fs').promises;
+const path = require('path');
+const process = require('process');
+const {authenticate} = require('@google-cloud/local-auth');
+const {google} = require('googleapis');
 
-// If modifying these scopes, delete your previously saved credentials
-// at ~./sheetsapi.json
-var SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-var TOKEN_DIR = './';
-var TOKEN_PATH = TOKEN_DIR + 'sheetsapi.json';
-
-// Load client secrets from a local file.
-fs.readFile('client_secret.json', function processClientSecrets(err, content) {
-  if (err) {
-    console.log('Error loading client secret file: ' + err);
-    return;
-  }
-  // Authorize a client with the loaded credentials, then call the
-  // Google Sheets API.
-  authorize(JSON.parse(content), listMajors);
-});
+// If modifying these scopes, delete token.json.
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
+// The file token.json stores the user's access and refresh tokens, and is
+// created automatically when the authorization flow completes for the first
+// time.
+const TOKEN_PATH = path.join(process.cwd(), 'token.json');
+const CREDENTIALS_PATH = path.join(process.cwd(), 'test.json');
 
 /**
- * Create an OAuth2 client with the given credentials, and then execute the
- * given callback function.
+ * Reads previously authorized credentials from the save file.
  *
- * @param {Object} credentials The authorization client credentials.
- * @param {function} callback The callback to call with the authorized client.
+ * @return {Promise<OAuth2Client|null>}
  */
-function authorize(credentials, callback) {
-  var clientSecret = credentials.installed.client_secret;
-  var clientId = credentials.installed.client_id;
-  var redirectUrl = credentials.installed.redirect_uris[0];
-  var auth = new googleAuth();
-  var oauth2Client = new auth.OAuth2(clientId, clientSecret, redirectUrl);
-
-  // Check if we have previously stored a token.
-  fs.readFile(TOKEN_PATH, function(err, token) {
-    if (err) {
-      getNewToken(oauth2Client, callback);
-    } else {
-      oauth2Client.credentials = JSON.parse(token);
-      callback(oauth2Client);
-    }
-  });
-}
-
-/**
- * Get and store new token after prompting for user authorization, and then
- * execute the given callback with the authorized OAuth2 client.
- *
- * @param {google.auth.OAuth2} oauth2Client The OAuth2 client to get token for.
- * @param {getEventsCallback} callback The callback to call with the authorized
- *     client.
- */
-function getNewToken(oauth2Client, callback) {
-  var authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: SCOPES
-  });
-  console.log('Authorize this app by visiting this url: ', authUrl);
-  var rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-  rl.question('Enter the code from that page here: ', function(code) {
-    rl.close();
-    oauth2Client.getToken(code, function(err, token) {
-      if (err) {
-        console.log('Error while trying to retrieve access token', err);
-        return;
-      }
-      oauth2Client.credentials = token;
-      storeToken(token);
-      callback(oauth2Client);
-    });
-  });
-}
-
-/**
- * Store token to disk be used in later program executions.
- *
- * @param {Object} token The token to store to disk.
- */
-function storeToken(token) {
+async function loadSavedCredentialsIfExist() {
   try {
-    fs.mkdirSync(TOKEN_DIR);
+    const content = await fs.readFile(TOKEN_PATH);
+    const credentials = JSON.parse(content);
+    return google.auth.fromJSON(credentials);
   } catch (err) {
-    if (err.code != 'EEXIST') {
-      throw err;
-    }
+    return null;
   }
-  fs.writeFile(TOKEN_PATH, JSON.stringify(token));
-  console.log('Token stored to ' + TOKEN_PATH);
 }
 
 /**
- * Print the names and majors of students in a sample spreadsheet:
- * https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit
+ * Serializes credentials to a file comptible with GoogleAUth.fromJSON.
+ *
+ * @param {OAuth2Client} client
+ * @return {Promise<void>}
  */
-function listMajors(auth) {
-  var sheets = google.sheets('v4');
-  sheets.spreadsheets.values.get({
-    auth: auth,
+async function saveCredentials(client) {
+  const content = await fs.readFile(CREDENTIALS_PATH);
+  const keys = JSON.parse(content);
+  const key = keys.installed || keys.web;
+  const payload = JSON.stringify({
+    type: 'authorized_user',
+    client_id: key.client_id,
+    client_secret: key.client_secret,
+    refresh_token: client.credentials.refresh_token,
+  });
+  await fs.writeFile(TOKEN_PATH, payload);
+}
+
+/**
+ * Load or request or authorization to call APIs.
+ *
+ */
+async function authorize() {
+  let client = await loadSavedCredentialsIfExist();
+  if (client) {
+    return client;
+  }
+  client = await authenticate({
+    scopes: SCOPES,
+    keyfilePath: CREDENTIALS_PATH,
+  });
+  if (client.credentials) {
+    await saveCredentials(client);
+  }
+  return client;
+}
+
+/**
+ * Prints the names and majors of students in a sample spreadsheet:
+ * @see https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit
+ * @param {google.auth.OAuth2} auth The authenticated Google OAuth client.
+ */
+async function listMajors(auth) {
+  const sheets = google.sheets({version: 'v4', auth});
+  const res = await sheets.spreadsheets.values.get({
     spreadsheetId: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
     range: 'Class Data!A2:E',
-  }, function(err, response) {
-    if (err) {
-      console.log('The API returned an error: ' + err);
-      return;
-    }
-    var rows = response.values;
-    if (rows.length == 0) {
-      console.log('No data found.');
-    } else {
-      console.log('Name, Major:');
-      for (var i = 0; i < rows.length; i++) {
-        var row = rows[i];
-        // Print columns A and E, which correspond to indices 0 and 4.
-        console.log('%s, %s', row[0], row[4]);
-      }
-    }
+  });
+  const rows = res.data.values;
+  if (!rows || rows.length === 0) {
+    console.log('No data found.');
+    return;
+  }
+  console.log('Name, Major:');
+  rows.forEach((row) => {
+    // Print columns A and E, which correspond to indices 0 and 4.
+    console.log(`${row[0]}, ${row[4]}`);
   });
 }
+
+authorize().then(listMajors).catch(console.error);
